@@ -75,6 +75,7 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 __device__ void compute_transmat(
 	const float3& p_orig,
 	const glm::vec2 scale,
+	float mod,
 	const glm::vec4 rot,
 	const float* projmatrix,
 	const float* viewmatrix,
@@ -85,7 +86,7 @@ __device__ void compute_transmat(
 ) {
 
 	glm::mat3 R = quat_to_rotmat(rot);
-	glm::mat3 S = scale_to_mat(scale, 1.0f);
+	glm::mat3 S = scale_to_mat(scale, mod);
 	glm::mat3 L = R * S;
 
 	// center of Gaussians in the camera coordinate
@@ -111,16 +112,13 @@ __device__ void compute_transmat(
 	T = glm::transpose(splat2world) * world2ndc * ndc2pix;
 	normal = transformVec4x3({L[2].x, L[2].y, L[2].z}, viewmatrix);
 
-#if DUAL_VISIABLE
-	float multiplier = normal.z < 0 ? 1: -1;
-	normal = multiplier * normal;
-#endif
 }
 
 // Computing the bounding box of the 2D Gaussian and its center
 // The center of the bounding box is used to create a low pass filter
 __device__ bool compute_aabb(
 	glm::mat3 T, 
+	float cutoff, 
 	float2& point_image,
 	float2 & extent
 ) {
@@ -129,7 +127,7 @@ __device__ bool compute_aabb(
 	float3 T3 = {T[2][0], T[2][1], T[2][2]};
 
 	// Compute AABB
-	float3 temp_point = {1.0f, 1.0f, -1.0f};
+	float3 temp_point = {cutoff * cutoff, cutoff * cutoff, -1.0f};
 	float distance = sumf3(T3 * T3 * temp_point);
 	float3 f = (1 / distance) * temp_point;
 	if (distance == 0.0) return false;
@@ -195,7 +193,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float3 normal;
 	if (transMat_precomp == nullptr)
 	{
-		compute_transmat(((float3*)orig_points)[idx], scales[idx], rotations[idx], projmatrix, viewmatrix, W, H, T, normal);
+		compute_transmat(((float3*)orig_points)[idx], scales[idx], scale_modifier, rotations[idx], projmatrix, viewmatrix, W, H, T, normal);
 		float3 *T_ptr = (float3*)transMats;
 		T_ptr[idx * 3 + 0] = {T[0][0], T[0][1], T[0][2]};
 		T_ptr[idx * 3 + 1] = {T[1][0], T[1][1], T[1][2]};
@@ -210,14 +208,28 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		normal = make_float3(0.0, 0.0, 1.0);
 	}
 
+#if DUAL_VISIABLE
+	float cos = -sumf3(p_view * normal);
+	if (cos == 0) return;
+	float multiplier = cos > 0 ? 1: -1;
+	normal = multiplier * normal;
+#endif
+
+#if TIGHTBBOX // no use in the paper, but it indeed help speeds.
+	// the effective extent is now depended on the opacity of gaussian.
+	float cutoff = sqrtf(max(9.f + 2.f * logf(opacities[idx]), 0.000001));
+#else
+	float cutoff = 3.0f;
+#endif
+
 	// Compute center and radius
 	float2 point_image;
 	float radius;
 	{
 		float2 extent;
-		bool ok = compute_aabb(T, point_image, extent);
+		bool ok = compute_aabb(T, cutoff, point_image, extent);
 		if (!ok) return;
-		radius = 3.0f * ceil(max(extent.x, extent.y));
+		radius = ceil(max(extent.x, extent.y));
 	}
 
 	uint2 rect_min, rect_max;
