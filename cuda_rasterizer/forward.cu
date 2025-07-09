@@ -413,8 +413,9 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
-		for (int ch = 0; ch < CHANNELS; ch++)
+		for (int ch = 0; ch < 3; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+		out_color[3 * H * W + pix_id] = C[3]; 
 
 #if RENDER_AXUTILITY
 		n_contrib[pix_id + H * W] = median_contributor;
